@@ -74,10 +74,12 @@ class BernoulliLogDensityLayer(lasagne.layers.MergeLayer):
         x = self.x if self.x is not None else input.pop(0)
 
         if x_mu.ndim > x.ndim:  # Check for sample dimensions.
-            x = x.dimshuffle((0, 'x', 'x', 1))
+            x = x.dimshuffle((0, 'x', 'x') + tuple(range(1, x.ndim)))
+
+        sum_axes = tuple(range(3, x.ndim))
 
         x_mu = T.clip(x_mu, self.eps, 1 - self.eps)
-        density = T.sum(-T.nnet.binary_crossentropy(x_mu, x), axis=-1, keepdims=True)
+        density = T.sum(-T.nnet.binary_crossentropy(x_mu, x), axis=sum_axes)[:,:,:,None]
         return density
 
 
@@ -103,7 +105,9 @@ class MultinomialLogDensityLayer(lasagne.layers.MergeLayer):
         x_mu += self.eps
 
         if x_mu.ndim > x.ndim:  # Check for sample dimensions.
-            x = x.dimshuffle((0, 'x', 'x', 1))
+            x = x.dimshuffle((0, 'x', 'x') + tuple(range(1, x.ndim)))
 
-        density = -(-T.sum(x * T.log(x_mu), axis=-1, keepdims=True))
+        sum_axes = tuple(range(3, x.ndim))
+
+        density = -(-T.sum(x * T.log(x_mu), axis=sum_axes))[:,:,:,None]
         return density

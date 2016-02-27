@@ -4,7 +4,7 @@ from lasagne import init
 from base import Model
 from lasagne_extensions.layers import (SampleLayer, GaussianMarginalLogDensityLayer, MultinomialLogDensityLayer,
                                        GaussianLogDensityLayer, BernoulliLogDensityLayer, InputLayer, DenseLayer,
-                                       DimshuffleLayer, ElemwiseSumLayer, ReshapeLayer, NonlinearityLayer,
+                                       DimshuffleLayer, ElemwiseSumLayer, ReshapeLayer, NonlinearityLayer, NINLayer,
                                        get_all_params, get_output)
 from lasagne_extensions.objectives import categorical_crossentropy
 from lasagne_extensions.nonlinearities import rectify, sigmoid, softmax
@@ -20,7 +20,7 @@ class ADGMSSL(Model):
     http://approximateinference.org/accepted/MaaloeEtAl2015.pdf.
     """
 
-    def __init__(self, n_x, n_a, n_z, n_y, a_hidden, z_hidden, xhat_hidden, y_hidden, trans_func=rectify,
+    def __init__(self, shape_x, n_a, n_z, n_y, n_xhat, f_enc, f_dec, z_hidden, y_hidden, trans_func=rectify,
                  x_dist='bernoulli'):
         """
         Initialize an auxiliary deep generative model consisting of
@@ -28,7 +28,7 @@ class ADGMSSL(Model):
         generative model P p(xhat|z,y),
         inference model Q q(a|x) and q(z|x,y).
         All weights are initialized using the Bengio and Glorot (2010) initialization scheme.
-        :param n_x: Number of inputs.
+        :param shape_x: Number of inputs.
         :param n_a: Number of auxiliary.
         :param n_z: Number of latent.
         :param n_y: Number of classes.
@@ -39,35 +39,44 @@ class ADGMSSL(Model):
         :param trans_func: The transfer function used in the deterministic layers.
         :param x_dist: The x distribution, 'bernoulli' or 'gaussian'.
         """
-        super(ADGMSSL, self).__init__(n_x, a_hidden + z_hidden + xhat_hidden, n_a + n_z, trans_func)
+        # super(ADGMSSL, self).__init__(n_x, a_hidden + z_hidden + xhat_hidden, n_a + n_z, trans_func)
+        super(ADGMSSL, self).__init__(shape_x, z_hidden, n_a + n_z, trans_func)
         self.y_hidden = y_hidden
         self.x_dist = x_dist
         self.n_y = n_y
-        self.n_x = n_x
+        self.shape_x = shape_x
         self.n_a = n_a
         self.n_z = n_z
 
         self._srng = RandomStreams()
 
+        if len(shape_x) == 1:
+            x_tensor_constructor = T.matrix
+        elif len(shape_x) == 2:
+            x_tensor_constructor = T.tensor3
+        elif len(shape_x) == 3:
+            x_tensor_constructor = T.tensor4
+        else:
+            raise TypeError, 'shape_x should have 1, 2 or 3 dimensions, not {0}'.format(len(shape_x))
+
         self.sym_beta = T.scalar('beta')  # symbolic upscaling of the discriminative term.
-        self.sym_x_l = T.matrix('x')  # symbolic labeled inputs
+        self.sym_x_l = x_tensor_constructor('x')  # symbolic labeled inputs
         self.sym_t_l = T.matrix('t')  # symbolic labeled targets
-        self.sym_x_u = T.matrix('x')  # symbolic unlabeled inputs
+        self.sym_x_u = x_tensor_constructor('x')  # symbolic unlabeled inputs
         self.sym_bs_l = T.iscalar('bs_l')  # symbolic number of labeled data_preparation points in batch
         self.sym_samples = T.iscalar('samples')  # symbolic number of Monte Carlo samples
         self.sym_y = T.matrix('y')
         self.sym_z = T.matrix('z')
 
         ### Input layers ###
-        l_x_in = InputLayer((None, n_x))
+        l_x_in = InputLayer((None,)+ shape_x)
         l_y_in = InputLayer((None, n_y))
 
+        l_x_post = f_enc(l_x_in)
+
         ### Auxiliary q(a|x) ###
-        l_a_x = l_x_in
-        for hid in a_hidden:
-            l_a_x = DenseLayer(l_a_x, hid, init.GlorotNormal('relu'), init.Normal(1e-3), self.transf)
-        l_a_x_mu = DenseLayer(l_a_x, n_a, init.GlorotNormal(), init.Normal(1e-3), None)
-        l_a_x_logvar = DenseLayer(l_a_x, n_a, init.GlorotNormal(), init.Normal(1e-3), None)
+        l_a_x_mu = DenseLayer(l_x_post, n_a, init.GlorotNormal(), init.Normal(1e-3), None)
+        l_a_x_logvar = DenseLayer(l_x_post, n_a, init.GlorotNormal(), init.Normal(1e-3), None)
         l_a_x = SampleLayer(l_a_x_mu, l_a_x_logvar, eq_samples=self.sym_samples)
         # Reshape all layers to align them for multiple samples in the lower bound calculation.
         l_a_x_reshaped = ReshapeLayer(l_a_x, (-1, self.sym_samples, 1, n_a))
@@ -78,7 +87,7 @@ class ADGMSSL(Model):
         # Concatenate the input x and the output of the auxiliary MLP.
         l_a_to_y = DenseLayer(l_a_x, y_hidden[0], init.GlorotNormal('relu'), init.Normal(1e-3), None)
         l_a_to_y = ReshapeLayer(l_a_to_y, (-1, self.sym_samples, 1, y_hidden[0]))
-        l_x_to_y = DenseLayer(l_x_in, y_hidden[0], init.GlorotNormal('relu'), init.Normal(1e-3), None)
+        l_x_to_y = DenseLayer(l_x_post, y_hidden[0], init.GlorotNormal('relu'), init.Normal(1e-3), None)
         l_x_to_y = DimshuffleLayer(l_x_to_y, (0, 'x', 'x', 1))
         l_y_xa = ReshapeLayer(ElemwiseSumLayer([l_a_to_y, l_x_to_y]), (-1, y_hidden[0]))
         l_y_xa = NonlinearityLayer(l_y_xa, self.transf)
@@ -91,7 +100,7 @@ class ADGMSSL(Model):
 
         ### Recognition q(z|x,y) ###
         # Concatenate the input x and y.
-        l_x_to_z = DenseLayer(l_x_in, z_hidden[0], init.GlorotNormal('relu'), init.Normal(1e-3), None)
+        l_x_to_z = DenseLayer(l_x_post, z_hidden[0], init.GlorotNormal('relu'), init.Normal(1e-3), None)
         l_x_to_z = DimshuffleLayer(l_x_to_z, (0, 'x', 'x', 1))
         l_y_to_z = DenseLayer(l_y_in, z_hidden[0], init.GlorotNormal('relu'), init.Normal(1e-3), None)
         l_y_to_z = DimshuffleLayer(l_y_to_z, (0, 'x', 'x', 1))
@@ -111,30 +120,34 @@ class ADGMSSL(Model):
 
         ### Generative p(xhat|z,y) ###
         # Concatenate the input x and y.
-        l_y_to_xhat = DenseLayer(l_y_in, xhat_hidden[0], init.GlorotNormal('relu'), init.Normal(1e-3), None)
+        l_y_to_xhat = DenseLayer(l_y_in, n_xhat, init.GlorotNormal('relu'), init.Normal(1e-3), None)
         l_y_to_xhat = DimshuffleLayer(l_y_to_xhat, (0, 'x', 'x', 1))
-        l_z_to_xhat = DenseLayer(l_z_xy, xhat_hidden[0], init.GlorotNormal('relu'), init.Normal(1e-3), None)
-        l_z_to_xhat = ReshapeLayer(l_z_to_xhat, (-1, self.sym_samples, 1, xhat_hidden[0]))
-        l_xhat_zy = ReshapeLayer(ElemwiseSumLayer([l_z_to_xhat, l_y_to_xhat]), [-1, xhat_hidden[0]])
+        l_z_to_xhat = DenseLayer(l_z_xy, n_xhat, init.GlorotNormal('relu'), init.Normal(1e-3), None)
+        l_z_to_xhat = ReshapeLayer(l_z_to_xhat, (-1, self.sym_samples, 1, n_xhat))
+        l_xhat_zy = ReshapeLayer(ElemwiseSumLayer([l_z_to_xhat, l_y_to_xhat]), [-1, n_xhat])
         l_xhat_zy = NonlinearityLayer(l_xhat_zy, self.transf)
-        if len(xhat_hidden) > 1:
-            for hid in xhat_hidden[1:]:
-                l_xhat_zy = DenseLayer(l_xhat_zy, hid, init.GlorotNormal('relu'), init.Normal(1e-3), self.transf)
+        l_xhat_zy = f_dec(l_xhat_zy)
+        if len(l_xhat_zy.output_shape) == 2:
+            f_lxhat_lyr = lambda input_layer, activation: DenseLayer(input_layer, shape_x[0], W=init.GlorotNormal(),
+                                                                     b=init.Normal(1e-3), nonlinearity=activation)
+        else:
+            f_lxhat_lyr = lambda input_layer, activation: NINLayer(input_layer, shape_x[0], W=init.GlorotNormal(),
+                                                                   b=init.Normal(1e-3), nonlinearity=activation)
         if x_dist == 'bernoulli':
             l_xhat_zy_mu_reshaped = None
             l_xhat_zy_logvar_reshaped = None
-            l_xhat_zy = DenseLayer(l_xhat_zy, n_x, init.GlorotNormal(), init.Normal(1e-3), sigmoid)
+            l_xhat_zy = f_lxhat_lyr(l_xhat_zy, sigmoid)
         elif x_dist == 'multinomial':
             l_xhat_zy_mu_reshaped = None
             l_xhat_zy_logvar_reshaped = None
-            l_xhat_zy = DenseLayer(l_xhat_zy, n_x, init.GlorotNormal(), init.Normal(1e-3), softmax)
+            l_xhat_zy = f_lxhat_lyr(l_xhat_zy, softmax)
         elif x_dist == 'gaussian':
-            l_xhat_zy_mu = DenseLayer(l_xhat_zy, n_x, init.GlorotNormal(), init.Normal(1e-3), None)
-            l_xhat_zy_logvar = DenseLayer(l_xhat_zy, n_x, init.GlorotNormal(), init.Normal(1e-3), None)
+            l_xhat_zy_mu = f_lxhat_lyr(l_xhat_zy, None)
+            l_xhat_zy_logvar = f_lxhat_lyr(l_xhat_zy, None)
             l_xhat_zy = SampleLayer(l_xhat_zy_mu, l_xhat_zy_logvar, eq_samples=1)
-            l_xhat_zy_mu_reshaped = ReshapeLayer(l_xhat_zy_mu, (-1, self.sym_samples, 1, n_x))
-            l_xhat_zy_logvar_reshaped = ReshapeLayer(l_xhat_zy_logvar, (-1, self.sym_samples, 1, n_x))
-        l_xhat_zy_reshaped = ReshapeLayer(l_xhat_zy, (-1, self.sym_samples, 1, n_x))
+            l_xhat_zy_mu_reshaped = ReshapeLayer(l_xhat_zy_mu, (-1, self.sym_samples, 1) + shape_x)
+            l_xhat_zy_logvar_reshaped = ReshapeLayer(l_xhat_zy_logvar, (-1, self.sym_samples, 1) + shape_x)
+        l_xhat_zy_reshaped = ReshapeLayer(l_xhat_zy, (-1, self.sym_samples, 1) + shape_x)
 
         ### Various class variables ###
         self.l_x_in = l_x_in
@@ -168,7 +181,9 @@ class ADGMSSL(Model):
         outputs = get_output(self.l_y, self.sym_x_l, deterministic=True).mean(axis=(1, 2))
         self.f_y = theano.function(inputs, outputs)
 
-        self.y_params = get_all_params(self.l_y, trainable=True)[(len(a_hidden) + 2) * 2::]
+        shared_params = get_all_params(l_x_post, trainable=True)
+        self.y_params = get_all_params(self.l_y, trainable=True)
+        self.y_params = [p for p in self.y_params if p not in shared_params]
         self.xhat_params = get_all_params(self.l_xhat, trainable=True)
 
     def build_model(self, train_set, test_set, validation_set=None):
@@ -216,7 +231,7 @@ class ADGMSSL(Model):
         # repeat unlabeled t the number of classes for integration (bs * n_y) x n_y.
         t_u = t_eye.reshape((self.n_y, 1, self.n_y)).repeat(bs_u, axis=1).reshape((-1, self.n_y))
         # repeat unlabeled x the number of classes for integration (bs * n_y) x n_x
-        x_u = self.sym_x_u.reshape((1, bs_u, self.n_x)).repeat(self.n_y, axis=0).reshape((-1, self.n_x))
+        x_u = self.sym_x_u.reshape((1, bs_u) + self.shape_x).repeat(self.n_y, axis=0).reshape((-1,) + self.shape_x)
         out_layers = [l_log_pa, l_log_pz, l_log_qa_x, l_log_qz_xy, l_px_zy]
         inputs = {self.l_x_in: x_u, self.l_y_in: t_u}
         log_pa_u, log_pz_u, log_qa_x_u, log_qz_axy_u, log_px_zy_u = get_output(out_layers, inputs)

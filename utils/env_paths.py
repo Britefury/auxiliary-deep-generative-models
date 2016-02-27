@@ -4,6 +4,12 @@ import time
 import datetime
 import uuid
 
+def shape_to_path_str(sh):
+    if isinstance(sh, (tuple, list)):
+        return '-'.join([x for x in sh])
+    else:
+        return str(sh)
+
 # Root paths
 def get_project_name():
     return 'auxiliary-deep-generative-models'
@@ -44,8 +50,8 @@ def get_pickle_path(root_path):
     return path_exists(join(root_path, 'pickled model'))
 
 
-def get_model_path(root_path, type, n_in, n_hidden, n_out):
-    return join(get_pickle_path(root_path), '%s_%s_%s_%s.pkl' % (type, str(n_in), str(n_hidden), str(n_out)))
+def get_model_path(root_path, type, shape_in, n_hidden, n_out):
+    return join(get_pickle_path(root_path), '%s_%s_%s_%s.pkl' % (type, shape_to_path_str(shape_in), shape_to_path_str(n_hidden), shape_to_path_str(n_out)))
 
 
 # Logging
@@ -68,16 +74,16 @@ def find_logging_path(id):
             return join(path, f)
 
 # Root path
-def get_root_output_path(type, n_in, n_hidden, n_out, id):
-    root = 'id_%s_%s_%s_%s_%s' % (str(id), type, str(n_in), str(n_hidden), str(n_out))
+def get_root_output_path(type, shape_in, n_hidden, n_out, id):
+    root = 'id_%s_%s_%s_%s_%s' % (str(id), type, shape_to_path_str(shape_in), shape_to_path_str(n_hidden), shape_to_path_str(n_out))
     path = join(get_output_path(), root)
     return path
 
 
-def create_root_output_path(type, n_in, n_hidden, n_out):
+def create_root_output_path(type, shape_in, n_hidden, shape_out):
     t = time.time()
     d = datetime.datetime.fromtimestamp(t).strftime('%Y%m%d%H%M%S')
-    root = 'id_%s_%s_%s_%s_%s' % (str(d), type, str(n_in), str(n_hidden), str(n_out))
+    root = 'id_%s_%s_%s_%s_%s' % (str(d), type, shape_to_path_str(shape_in), shape_to_path_str(n_hidden), shape_to_path_str(shape_out))
     path = join(get_output_path(), root)
     if exists(path): path += "_(%s)" % str(uuid.uuid4())
     return path_exists(path)
